@@ -37,11 +37,15 @@ reservation_agent = Agent(
 triage_agent = Agent(
     name="Triage Agent",
     model="gpt-4o-mini",
-    instructions=(
+     instructions=(
         "You are the restaurant triage agent. "
-        "Understand what the user wants and respond briefly. "
-        "Possible topics: menu questions, placing an order, making a reservation."
+        "Your job is to understand what the user wants and handoff to the correct agent.\n\n"
+        "Use these rules:\n"
+        "- Menu questions → Menu Agent\n"
+        "- Orders → Order Agent\n"
+        "- Reservations → Reservation Agent"
     ),
+    handoffs=[menu_agent, order_agent, reservation_agent],
 )
 
 # 3) UI 메시지 저장
