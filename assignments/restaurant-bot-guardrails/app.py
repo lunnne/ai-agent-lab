@@ -1,27 +1,65 @@
-import streamlit as st
-from agents import Agent, Runner, InputGuardrail,GuardrailFunctionOutput
 import asyncio
+import os
 
+import streamlit as st
+from agents import (
+    Agent,
+    Runner,
+    InputGuardrail,
+    OutputGuardrail,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
+    OutputGuardrailTripwireTriggered,
+)
+
+# -----------------------------
+# 0) Streamlit / API key
+# -----------------------------
 st.set_page_config(page_title="Restaurant Bot", page_icon="🍽️")
 st.title("🍽️ Restaurant Bot")
 
+# Streamlit Cloud / local secrets 대응
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 
-# Input Guardrail function
+# -----------------------------
+# 1) Input Guardrail
+# - 주제 이탈 / 욕설 차단
+# - blocking mode(run_in_parallel=False)로 설정해서
+#   agent/tool 실행 전에 먼저 막음
+# -----------------------------
 def restaurant_input_guardrail(ctx, agent, user_input):
     if isinstance(user_input, list):
-        text = user_input[-1]["content"].lower()
+        last_item = user_input[-1]
+        if isinstance(last_item, dict):
+            text = str(last_item.get("content", "")).lower()
+        else:
+            text = str(last_item).lower()
     else:
-        text = user_input.lower()
+        text = str(user_input).lower()
 
-    off_topic = ["meaning of life", "politics", "math", "weather"]
-    bad_words = ["fuck", "shit"]
+    off_topic_keywords = [
+        "meaning of life",
+        "politics",
+        "math",
+        "weather",
+        "stock",
+        "bitcoin",
+        "philosophy",
+        "이성",
+        "정치",
+        "수학",
+        "날씨",
+        "인생의 의미",
+    ]
+    bad_words = ["fuck", "shit", "bitch", "개새끼", "씨발", "좆", "병신"]
 
-    if any(word in text for word in off_topic):
+    if any(word in text for word in off_topic_keywords):
         return GuardrailFunctionOutput(
             tripwire_triggered=True,
             output_info={
-                "message": "저는 레스토랑 관련 질문만 도와드릴 수 있어요 🙂"
+                "message": "저는 레스토랑 관련 질문에 대해서만 도와드리고 있어요. 메뉴를 확인하거나, 예약하거나, 음식을 주문할 수 있어요 🙂"
             },
         )
 
@@ -29,7 +67,7 @@ def restaurant_input_guardrail(ctx, agent, user_input):
         return GuardrailFunctionOutput(
             tripwire_triggered=True,
             output_info={
-                "message": "정중한 표현으로 질문해주시면 감사하겠습니다."
+                "message": "불편하셨을 수 있지만, 정중한 표현으로 말씀해 주시면 더 잘 도와드릴 수 있어요."
             },
         )
 
@@ -39,16 +77,68 @@ def restaurant_input_guardrail(ctx, agent, user_input):
     )
 
 
+# -----------------------------
+# 2) Output Guardrail
+# - 정중하고 전문적인 응답 유지
+# - 내부 정보 / 시스템 프롬프트 / 비밀 레시피 등 차단
+# -----------------------------
+def restaurant_output_guardrail(ctx, agent, output):
+    text = str(output).lower()
 
-# 1) 전문 Agent들
+    banned_internal_keywords = [
+        "system prompt",
+        "internal instruction",
+        "hidden instruction",
+        "secret recipe",
+        "internal policy",
+        "developer message",
+        "chain of thought",
+        "tool schema",
+        "our internal notes",
+    ]
+
+    rude_phrases = [
+        "that's not my problem",
+        "i don't care",
+        "shut up",
+        "stupid",
+    ]
+
+    if any(word in text for word in banned_internal_keywords):
+        return GuardrailFunctionOutput(
+            tripwire_triggered=True,
+            output_info={
+                "message": "죄송하지만 내부 정보는 안내드릴 수 없습니다."
+            },
+        )
+
+    if any(word in text for word in rude_phrases):
+        return GuardrailFunctionOutput(
+            tripwire_triggered=True,
+            output_info={
+                "message": "죄송합니다. 보다 정중하고 전문적인 표현으로 다시 안내드리겠습니다."
+            },
+        )
+
+    return GuardrailFunctionOutput(
+        tripwire_triggered=False,
+        output_info=None,
+    )
+
+
+# -----------------------------
+# 3) Specialist Agents
+# -----------------------------
 menu_agent = Agent(
     name="Menu Agent",
     model="gpt-4o-mini",
     instructions=(
         "You are a menu specialist for a restaurant. "
         "Answer questions about menu items, ingredients, vegetarian options, and allergies. "
-        "Be clear, friendly, and concise."
+        "Be clear, friendly, concise, and professional. "
+        "Do not invent unavailable menu items."
     ),
+    output_guardrails=[OutputGuardrail(guardrail_function=restaurant_output_guardrail)],
 )
 
 order_agent = Agent(
@@ -56,19 +146,11 @@ order_agent = Agent(
     model="gpt-4o-mini",
     instructions=(
         "You are an order specialist for a restaurant. "
-        "Help users place an order, confirm menu items, quantities, and ask follow-up questions if needed. "
-        "Be clear and practical."
+        "Help users place an order, confirm items and quantities, "
+        "and ask short follow-up questions if needed. "
+        "Be practical, professional, and polite."
     ),
-)
-complaints_agent = Agent(
-    name="Complaints Agent",
-    model="gpt-4o-mini",
-    instructions=(
-        "You handle unhappy restaurant customers. "
-        "Acknowledge their frustration, apologize sincerely, "
-        "offer practical solutions like refund, discount, or manager callback, "
-        "and escalate serious issues appropriately."
-    ),
+    output_guardrails=[OutputGuardrail(guardrail_function=restaurant_output_guardrail)],
 )
 
 reservation_agent = Agent(
@@ -77,11 +159,28 @@ reservation_agent = Agent(
     instructions=(
         "You are a reservation specialist for a restaurant. "
         "Help users make a table reservation. "
-        "Ask for number of people, date, and time if missing."
+        "Ask for number of people, date, and time if missing. "
+        "Be warm, clear, and polite."
     ),
+    output_guardrails=[OutputGuardrail(guardrail_function=restaurant_output_guardrail)],
 )
 
-# 2) Triage Agent
+complaints_agent = Agent(
+    name="Complaints Agent",
+    model="gpt-4o-mini",
+    instructions=(
+        "You handle unhappy restaurant customers. "
+        "Always acknowledge the customer's frustration, apologize sincerely, "
+        "and offer practical solutions such as a refund, a discount, or a manager callback. "
+        "If the issue sounds serious or repeated, clearly escalate it to a manager. "
+        "Be empathetic, calm, professional, and solution-oriented."
+    ),
+    output_guardrails=[OutputGuardrail(guardrail_function=restaurant_output_guardrail)],
+)
+
+# -----------------------------
+# 4) Triage Agent
+# -----------------------------
 triage_agent = Agent(
     name="Triage Agent",
     model="gpt-4o-mini",
@@ -91,53 +190,57 @@ triage_agent = Agent(
         "Routing rules:\n"
         "- Questions about menu, ingredients, vegetarian options, allergies -> Menu Agent\n"
         "- Requests to order food -> Order Agent\n"
-        "- Requests to book or reserve a table -> Reservation Agent\n\n"
-        "- Complaints about food, staff, service, or bad experiences -> Complaints Agent\n"
+        "- Requests to book or reserve a table -> Reservation Agent\n"
+        "- Complaints about food, staff, service, delays, wrong orders, or bad experiences -> Complaints Agent\n\n"
         "Before handing off, briefly say you are connecting the user to the right specialist."
     ),
     handoffs=[menu_agent, order_agent, reservation_agent, complaints_agent],
-    input_guardrails=[InputGuardrail(guardrail_function=restaurant_input_guardrail)]
+    input_guardrails=[
+        InputGuardrail(
+            guardrail_function=restaurant_input_guardrail,
+            run_in_parallel=False,
+        )
+    ],
+    output_guardrails=[OutputGuardrail(guardrail_function=restaurant_output_guardrail)],
 )
 
-# 3) UI용 대화 기록
+# -----------------------------
+# 5) UI memory
+# -----------------------------
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-# 4) 이전 메시지 렌더링
 for m in st.session_state["messages"]:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
 
+# -----------------------------
+# 6) Handoff label
+# -----------------------------
 def handoff_message(agent_name: str) -> str | None:
-    """전문 agent 이름에 따라 UI용 handoff 문구를 반환"""
     mapping = {
         "Menu Agent": "메뉴 전문가에게 연결합니다...",
         "Order Agent": "주문 담당에게 연결합니다...",
         "Reservation Agent": "예약 담당에게 연결합니다...",
+        "Complaints Agent": "불만 처리 담당자에게 연결합니다...",
     }
     return mapping.get(agent_name)
 
 
+# -----------------------------
+# 7) Streamed run
+# -----------------------------
 async def run_restaurant_bot(user_text: str):
-    """
-    스트리밍 실행:
-    - handoff 발생 시 UI에 안내 문구 출력
-    - 최종 답변 반환
-    """
     result = Runner.run_streamed(triage_agent, user_text)
-
     seen_handoff_agents = set()
 
     async for event in result.stream_events():
-        # agent가 바뀌는 순간 감지
         if event.type == "agent_updated_stream_event":
             new_agent_name = event.new_agent.name
 
-            # triage -> specialist 로 넘어갈 때만 표시
             if new_agent_name != "Triage Agent" and new_agent_name not in seen_handoff_agents:
                 seen_handoff_agents.add(new_agent_name)
-
                 msg = handoff_message(new_agent_name)
                 if msg:
                     st.markdown(f"_{msg}_")
@@ -145,19 +248,38 @@ async def run_restaurant_bot(user_text: str):
     return result.final_output
 
 
-# 5) 사용자 입력
+# -----------------------------
+# 8) Chat input
+# -----------------------------
 user_text = st.chat_input("무엇을 도와드릴까요?")
 
 if user_text:
-    # user message 저장 + 출력
     st.session_state["messages"].append({"role": "user", "content": user_text})
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # assistant 실행 + 출력
     with st.chat_message("assistant"):
         with st.spinner("적절한 담당자를 찾는 중..."):
-            answer = asyncio.run(run_restaurant_bot(user_text))
+            try:
+                answer = asyncio.run(run_restaurant_bot(user_text))
+
+            except InputGuardrailTripwireTriggered as e:
+                answer = "저는 레스토랑 관련 질문에 대해서만 도와드리고 있어요 🙂"
+                if getattr(e, "guardrail_result", None):
+                    info = e.guardrail_result.output.output_info
+                    if isinstance(info, dict) and "message" in info:
+                        answer = info["message"]
+
+            except OutputGuardrailTripwireTriggered as e:
+                answer = "죄송합니다. 안전하고 정중한 방식으로만 안내드릴 수 있어요."
+                if getattr(e, "guardrail_result", None):
+                    info = e.guardrail_result.output.output_info
+                    if isinstance(info, dict) and "message" in info:
+                        answer = info["message"]
+
+            except Exception:
+                answer = "죄송합니다. 요청을 처리하는 중 문제가 발생했습니다. 다시 시도해 주세요."
+
             st.markdown(answer)
 
-    st.session_state["messages"].append({"role": "assistant", "content": answer})
+    st.session_state["messages"].append({"role": "assistant", "content": answer})git uv
